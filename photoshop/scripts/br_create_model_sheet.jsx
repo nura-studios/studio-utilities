@@ -291,23 +291,35 @@ function createSmartObjectLayer(doc, fileInfo, x, y, targetWidth, targetHeight, 
         var currentWidth = bounds[2].value - bounds[0].value;
         var currentHeight = bounds[3].value - bounds[1].value;
         
-        // Calculate scale to match target dimensions while maintaining aspect ratio
-        var scaleX = targetWidth / currentWidth;
-        var scaleY = targetHeight / currentHeight;
-        var scale = Math.min(scaleX, scaleY) * 100; // Convert to percentage
+        // Calculate scale to fit within target dimensions while maintaining aspect ratio
+        // Use a slightly smaller scale to ensure it fits completely within the cell
+        var scaleX = (targetWidth * 0.95) / currentWidth; // 95% to add padding
+        var scaleY = (targetHeight * 0.95) / currentHeight; // 95% to add padding
+        var scale = Math.min(scaleX, scaleY) * 100; // Convert to percentage and use smaller scale
         
-        // Scale the smart object
+        // Ensure minimum reasonable scale
+        if (scale < 5) scale = 5; // Prevent extremely small images
+        if (scale > 200) scale = 200; // Prevent extremely large images
+        
+        // Scale the smart object from center
         if (scale !== 100) {
             smartObjectLayer.resize(scale, scale, AnchorPosition.MIDDLECENTER);
         }
         
-        // Position the layer at the specified center point
-        var newBounds = smartObjectLayer.bounds;
-        var currentCenterX = (newBounds[0].value + newBounds[2].value) / 2;
-        var currentCenterY = (newBounds[1].value + newBounds[3].value) / 2;
+        // Get new bounds after scaling for accurate positioning
+        var scaledBounds = smartObjectLayer.bounds;
+        var scaledWidth = scaledBounds[2].value - scaledBounds[0].value;
+        var scaledHeight = scaledBounds[3].value - scaledBounds[1].value;
+        
+        // Calculate current center after scaling
+        var currentCenterX = (scaledBounds[0].value + scaledBounds[2].value) / 2;
+        var currentCenterY = (scaledBounds[1].value + scaledBounds[3].value) / 2;
+        
+        // Calculate translation needed to center in target position
         var deltaX = x - currentCenterX;
         var deltaY = y - currentCenterY;
         
+        // Apply the translation
         smartObjectLayer.translate(deltaX, deltaY);
         
     } catch (error) {
