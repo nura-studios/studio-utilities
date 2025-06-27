@@ -29,6 +29,9 @@ function main() {
         var folderName = targetFolder.name;
         var docName = folderName + "_modelsheet_v.000";
         
+        // Find next available version number for PSD (don't overwrite existing)
+        docName = getNextAvailableVersion(targetFolder, folderName);
+        
         // Create a new 2048x2048 document
         var doc = app.documents.add(2048, 2048, 72, docName);
         
@@ -54,16 +57,14 @@ function main() {
         var saveFile = new File(targetFolder + "/" + saveFileName);
         var jpgFile = new File(targetFolder + "/" + jpgFileName);
         
-        // Save as PSD
-        doc.saveAs(saveFile);
-        
-        // Export as JPG
+        // Export as JPG first (to avoid marking document as dirty)
         var exportOptions = new ExportOptionsSaveForWeb();
         exportOptions.format = SaveDocumentType.JPEG;
         exportOptions.quality = 80; // Higher quality for model sheets
         doc.exportDocument(jpgFile, ExportType.SAVEFORWEB, exportOptions);
         
-        alert("Model sheet created and saved successfully!\nCreated " + matchedFiles.length + " smart object layers.\nSaved as: " + saveFileName + " and " + jpgFileName);
+        // Save as PSD after JPEG export
+        doc.saveAs(saveFile);
         
     } catch (error) {
         alert("Error: " + error.message);
@@ -119,9 +120,8 @@ function createCustomModelSheet(doc, matchedFiles, targetFolder, folderName) {
         var docWidth = 2048;
         var docHeight = 2048;
         
-        // Create a group for all model sheet layers
-        var modelSheetGroup = doc.layerSets.add();
-        modelSheetGroup.name = "Model Sheet - " + getTimeStamp();
+        // Create 50% gray background layer
+        createGrayBackground(doc);
         
         // Separate files by type
         var heroFile = null;
@@ -171,7 +171,7 @@ function createCustomModelSheet(doc, matchedFiles, targetFolder, folderName) {
             var heroX = docWidth - (heroWidth / 2); // Right side, centered
             var heroY = docHeight / 2; // Vertically centered
             
-            createSmartObjectLayer(doc, heroFile, heroX, heroY, heroWidth, heroHeight, modelSheetGroup);
+            createSmartObjectLayer(doc, heroFile, heroX, heroY, heroWidth, heroHeight);
         }
         
         // Create grid images (left side, 2x2 grid)
@@ -227,13 +227,129 @@ function createCustomModelSheet(doc, matchedFiles, targetFolder, folderName) {
                 var fileInfo = sortedGridFiles[i];
                 var pos = positions[i];
                 
-                createSmartObjectLayer(doc, fileInfo, pos.x, pos.y, targetWidth, targetHeight, modelSheetGroup);
+                createSmartObjectLayer(doc, fileInfo, pos.x, pos.y, targetWidth, targetHeight);
             }
         }
         
     } finally {
         // Restore original ruler units
         app.preferences.rulerUnits = originalRulerUnits;
+    }
+}
+
+/**
+ * Create a 50% gray background layer
+ * @param {Document} doc - The active document
+ */
+function createGrayBackground(doc) {
+    try {
+        // Remove the default Background layer if it exists using Action Manager
+        try {
+            // First check if there's a background layer
+            var backgroundLayer = doc.backgroundLayer;
+            if (backgroundLayer) {
+                // Convert background to regular layer first, then delete
+                var idsetd = charIDToTypeID("setd");
+                var desc = new ActionDescriptor();
+                var idnull = charIDToTypeID("null");
+                var ref = new ActionReference();
+                var idLyr = charIDToTypeID("Lyr ");
+                var idBckg = charIDToTypeID("Bckg");
+                ref.putEnumerated(idLyr, idLyr, idBckg);
+                desc.putReference(idnull, ref);
+                var idT = charIDToTypeID("T   ");
+                var layerDesc = new ActionDescriptor();
+                var idOpct = charIDToTypeID("Opct");
+                var idPrc = charIDToTypeID("#Prc");
+                layerDesc.putUnitDouble(idOpct, idPrc, 100.000000);
+                var idLyr = charIDToTypeID("Lyr ");
+                desc.putObject(idT, idLyr, layerDesc);
+                executeAction(idsetd, desc, DialogModes.NO);
+                
+                // Now delete the converted layer
+                var idDlt = charIDToTypeID("Dlt ");
+                var desc2 = new ActionDescriptor();
+                var idnull = charIDToTypeID("null");
+                var ref2 = new ActionReference();
+                var idLyr = charIDToTypeID("Lyr ");
+                var idOrdn = charIDToTypeID("Ordn");
+                var idTrgt = charIDToTypeID("Trgt");
+                ref2.putEnumerated(idLyr, idOrdn, idTrgt);
+                desc2.putReference(idnull, ref2);
+                executeAction(idDlt, desc2, DialogModes.NO);
+            }
+        } catch (e) {
+            // Background layer doesn't exist or can't be removed - continue anyway
+        }
+        
+        // Create solid color layer using Action Manager (proper way)
+        var idMk = charIDToTypeID("Mk  ");
+        var desc = new ActionDescriptor();
+        var idnull = charIDToTypeID("null");
+        var ref = new ActionReference();
+        var idcontentLayer = stringIDToTypeID("contentLayer");
+        ref.putClass(idcontentLayer);
+        desc.putReference(idnull, ref);
+        var idUsng = charIDToTypeID("Usng");
+        var layerDesc = new ActionDescriptor();
+        var idType = charIDToTypeID("Type");
+        var colorDesc = new ActionDescriptor();
+        var idClr = charIDToTypeID("Clr ");
+        var rgbDesc = new ActionDescriptor();
+        var idRd = charIDToTypeID("Rd  ");
+        rgbDesc.putDouble(idRd, 128); // 50% gray
+        var idGrn = charIDToTypeID("Grn ");
+        rgbDesc.putDouble(idGrn, 128); // 50% gray
+        var idBl = charIDToTypeID("Bl  ");
+        rgbDesc.putDouble(idBl, 128); // 50% gray
+        var idRGBC = charIDToTypeID("RGBC");
+        colorDesc.putObject(idClr, idRGBC, rgbDesc);
+        var idsolidColorLayer = stringIDToTypeID("solidColorLayer");
+        layerDesc.putObject(idType, idsolidColorLayer, colorDesc);
+        var idcontentLayer = stringIDToTypeID("contentLayer");
+        desc.putObject(idUsng, idcontentLayer, layerDesc);
+        executeAction(idMk, desc, DialogModes.NO);
+        
+        // Get the newly created layer
+        var newLayer = doc.activeLayer;
+        
+        // Delete any layer mask that was created
+        try {
+            var idDlt = charIDToTypeID("Dlt ");
+            var desc3 = new ActionDescriptor();
+            var idnull = charIDToTypeID("null");
+            var ref3 = new ActionReference();
+            var idChnl = charIDToTypeID("Chnl");
+            var idOrdn = charIDToTypeID("Ordn");
+            var idTrgt = charIDToTypeID("Trgt");
+            ref3.putEnumerated(idChnl, idOrdn, idTrgt);
+            desc3.putReference(idnull, ref3);
+            executeAction(idDlt, desc3, DialogModes.NO);
+        } catch (e) {
+            // No mask to delete
+        }
+        
+        // Rename the layer
+        newLayer.name = "Gray Background";
+        
+        // Move the background layer to the bottom
+        newLayer.move(doc, ElementPlacement.PLACEATEND);
+        
+        // Try to remove any remaining background layers
+        try {
+            // Look for any layers named "Background" and remove them
+            for (var i = doc.layers.length - 1; i >= 0; i--) {
+                var layer = doc.layers[i];
+                if (layer.name.toLowerCase() === "background" && layer !== newLayer) {
+                    layer.remove();
+                }
+            }
+        } catch (e) {
+            // Could not remove background layers
+        }
+        
+    } catch (error) {
+        throw new Error("Failed to create gray background: " + error.message);
     }
 }
 
@@ -245,9 +361,8 @@ function createCustomModelSheet(doc, matchedFiles, targetFolder, folderName) {
  * @param {Number} y - Y position (center point)
  * @param {Number} targetWidth - Target width for the smart object
  * @param {Number} targetHeight - Target height for the smart object
- * @param {LayerSet} parentGroup - Parent group for the layer
  */
-function createSmartObjectLayer(doc, fileInfo, x, y, targetWidth, targetHeight, parentGroup) {
+function createSmartObjectLayer(doc, fileInfo, x, y, targetWidth, targetHeight) {
     try {
         // Place the file as a linked smart object using File menu approach
         try {
@@ -282,9 +397,6 @@ function createSmartObjectLayer(doc, fileInfo, x, y, targetWidth, targetHeight, 
         
         // Rename the layer with keyword only
         smartObjectLayer.name = fileInfo.keyword;
-        
-        // Move layer to parent group
-        smartObjectLayer.move(parentGroup, ElementPlacement.INSIDE);
         
         // Get current bounds for scaling calculation
         var bounds = smartObjectLayer.bounds;
@@ -352,4 +464,26 @@ function getTimeStamp() {
 function zeroPad(num, places) {
     var numZeroes = places - num.toString().length + 1;
     return Array(+(numZeroes > 0 && numZeroes)).join("0") + num;
+}
+
+/**
+ * Find next available version number for PSD (don't overwrite existing)
+ * @param {Folder} targetFolder - The source folder containing PSD files
+ * @param {String} folderName - The name of the source folder
+ * @returns {String} Next available version number
+ */
+function getNextAvailableVersion(targetFolder, folderName) {
+    var version = 0;
+    
+    while (true) {
+        var docName = folderName + "_modelsheet_v." + zeroPad(version, 3);
+        var saveFileName = docName + ".psd";
+        var saveFile = new File(targetFolder + "/" + saveFileName);
+        
+        if (!saveFile.exists) {
+            return docName;
+        }
+        
+        version++;
+    }
 } 
