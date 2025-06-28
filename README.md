@@ -152,6 +152,10 @@ The player automatically adapts based on your media type:
 3. Use Up/Down to stay focused on current media type
 4. Switch files to change interaction mode as needed
 
+#### Fast Approval Workflow with MPV
+
+MPV is an open source media player that can look at images, audio and video. We've customized it so that there are specialized hotkeys for cycling through media files quickly using the up and down arrow keyboard shortcuts. When you have found an image, video, or audio that you like press the "s" key to make a select. If the currently viewed file has "_attempt_##" in the name, MPV will copy the currently displayed media file with the attempt suffix removed from the filename. The presence of this file will mark it as an approved asset and it will no longer be regenerated during the regeneration process. This means that if you wish to un-approve something, just delete the file with the delete key and the next regeneration will see that no select has been made and will regenerate new attempts for review.
+
 ---
 
 ## 🎨 Photoshop Model Sheet Generator
