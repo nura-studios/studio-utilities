@@ -101,7 +101,18 @@ The player automatically adapts based on your media type:
 | `ctrl+c` | Copy current frame to clipboard                |
 | `DEL`    | Move current file to recycle bin               |
 | `F2`     | Rename current file                            |
-| `\`      | Toggle attempt files visibility                |
+| `\`      | Toggle variant mode (show/hide attempt files)  |
+| `ctrl+r` | Manually rebuild playlist                      |
+
+#### Media Shifting & Organization
+
+| Key          | Function                                   |
+| ------------ | ------------------------------------------ |
+| `ctrl+Left`  | Shift media backward / Insert at beginning |
+| `ctrl+Right` | Shift media forward / Insert at end        |
+
+**For frame-sequenced files**: Swaps current file group (main + attempts) with adjacent group  
+**For non-frame files**: Integrates file group into frame sequence
 
 #### Smart Modes (Auto-Detected)
 
@@ -121,6 +132,58 @@ The player automatically adapts based on your media type:
 
 - Mouse wheel = Navigate through audio files only
 - Up/Down arrows = Navigate only audio files
+
+#### 🎯 Variant Mode System
+
+The player automatically detects and manages attempt files (`_attempt_##` suffix) with intelligent behavior:
+
+**Auto-Detection**:
+
+- Click main file (`frame_001.png`) → Variant mode OFF (main files only)
+- Click attempt file (`frame_001_attempt_01.png`) → Variant mode ON (show variants)
+
+**Variant Mode States**:
+
+- **OFF**: Shows only main files for clean progression (`frame_001.png` → `frame_002.png`)
+- **ON**: Shows all files including attempts (`frame_001.png` → `frame_001_attempt_01.png` → `frame_002.png`)
+
+**Manual Toggle**: Press `\` to toggle variant mode anytime
+
+#### 🔄 Smart File Integration
+
+Transform non-frame files into organized sequences:
+
+**Ctrl+Right (Insert at end)**:
+
+```
+Before:
+- frame_001.png
+- frame_002.png
+- concept_art.png ← current file
+- concept_art_v2.png
+
+After:
+- frame_001.png
+- frame_002.png
+- frame_003.png ← was concept_art.png
+- frame_003_attempt_01.png ← was concept_art_v2.png
+```
+
+**Ctrl+Left (Insert at beginning)**:
+
+```
+Before:
+- frame_001.png
+- frame_002.png
+- concept_art.png ← current file
+
+After:
+- frame_001.png ← was concept_art.png
+- frame_002.png ← was frame_001.png (shifted)
+- frame_003.png ← was frame_002.png (shifted)
+```
+
+**Similar File Detection**: Automatically finds related files (`concept_art.png`, `concept_art_v2.png`, `concept_art_final.png`) and organizes them as attempt variants.
 
 ### 🎨 Artist Workflows with MPV
 
@@ -152,9 +215,77 @@ The player automatically adapts based on your media type:
 3. Use Up/Down to stay focused on current media type
 4. Switch files to change interaction mode as needed
 
+#### Smart Sequence Organization Workflow
+
+1. **Scattered Files**: Start with mixed files like `concept_art.png`, `hero_pose.png`, `frame_001.png`
+2. **Auto-Detection**: Open any file - variant mode automatically adjusts
+3. **Quick Integration**: Press `Ctrl+Right` on concept files to add them to sequence
+4. **Batch Organization**: Similar files (`concept_art_v2.png`) automatically become attempts
+5. **Sequence Shifting**: Use `Ctrl+Left/Right` to rearrange frame order as needed
+6. **Clean Navigation**: Toggle variant mode with `\` to focus on main files or see all variants
+
+#### Frame Sequence Management Workflow
+
+1. **Review Sequence**: Navigate through `frame_001.png` → `frame_002.png` → `frame_003.png`
+2. **Swap Adjacent**: Press `Ctrl+Right` to swap current group with next group
+3. **Move Groups**: Rearrange frame order by swapping groups of related files
+4. **Maintain Attempts**: All attempt files move with their main file automatically
+5. **Instant Feedback**: See file counts in OSD: `"Shifted forward: 002 ↔ 003 (2+3 files)"`
+
 #### Fast Approval Workflow with MPV
 
 MPV is an open source media player that can look at images, audio and video. We've customized it so that there are specialized hotkeys for cycling through media files quickly using the up and down arrow keyboard shortcuts. When you have found an image, video, or audio that you like press the "s" key to make a select. If the currently viewed file has "_attempt_##" in the name, MPV will copy the currently displayed media file with the attempt suffix removed from the filename. The presence of this file will mark it as an approved asset and it will no longer be regenerated during the regeneration process. This means that if you wish to un-approve something, just delete the file with the delete key and the next regeneration will see that no select has been made and will regenerate new attempts for review.
+
+### 🎨 Artist-Friendly Customizations
+
+#### Custom OSD (On-Screen Display)
+
+- **Small, unobtrusive text**: 1/3 regular size for minimal distraction
+- **Bottom-left positioning**: Stays out of the way of your media
+- **33% opacity**: Subtle transparency that doesn't interfere with content
+- **Smart feedback**: Shows file counts, mode changes, and operation status
+
+#### Instant Response System
+
+- **Immediate feedback**: See "Renaming..." message as soon as you press hotkeys
+- **Smart rebuilding**: Playlist builds automatically but preserves your current file
+- **Minimal interruption**: File changes happen in 0.015 seconds to avoid flashing
+
+#### Enhanced Navigation
+
+- **Mouse wheel navigation**: Works seamlessly with images, videos, and audio
+- **Intelligent filtering**: Automatically shows relevant files based on current media type
+- **Playlist persistence**: Your navigation state is maintained across directory changes
+
+### 🏆 Advanced Features Summary
+
+#### Smart File Organization
+
+- **Automatic sequence integration**: Transform scattered files into organized frame sequences
+- **Intelligent attempt detection**: Automatically group related files as attempts
+- **Batch file operations**: Move groups of related files together
+- **Zero-padding preservation**: Maintains consistent numbering (`001`, `002`, `003`)
+
+#### Workflow Intelligence
+
+- **Context-aware behavior**: Different modes for different media types
+- **Auto-detection**: Variant mode automatically adjusts based on file clicked
+- **Instant feedback**: Visual confirmation of all operations
+- **Undo-friendly**: All operations are file-based and reversible
+
+#### Professional Integration
+
+- **PowerShell integration**: Uses Windows native commands for reliable file operations
+- **Clipboard support**: Copy frames directly to clipboard for quick sharing
+- **Recycle bin safety**: Deleted files go to recycle bin, not permanent deletion
+- **Concurrent operation protection**: Prevents conflicts during bulk operations
+
+#### Performance Optimizations
+
+- **Minimal UI disruption**: 0.015-second file change timing
+- **Smart playlist rebuilding**: Only rebuilds when necessary
+- **Efficient directory scanning**: Uses MPV's native file reading for speed
+- **Background operations**: File operations don't block navigation
 
 ---
 

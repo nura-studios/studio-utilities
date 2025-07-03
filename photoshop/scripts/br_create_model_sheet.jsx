@@ -8,6 +8,10 @@
  * Layout: Front/Left/Right/Back in 2x2 grid (left side, 1/2 height each)
  *         Hero image (right side, full height)
  * 
+ * Fallback: If no keyword files are found, creates a tiled collage layout
+ *           with all available PNG files arranged in a grid similar to
+ *           Flickr/Pinterest style layouts
+ * 
  * Author: Bay Raitt
  * Date: 2025
  */
@@ -42,14 +46,22 @@ function main() {
         var matchedFiles = findMatchingFiles(targetFolder, keywords);
         
         if (matchedFiles.length === 0) {
-            alert("No PNG files found with keywords: " + keywords.join(", "));
-            // Close the document since no files were found
-            doc.close(SaveOptions.DONOTSAVECHANGES);
-            return;
+            // No keyword files found, check for any PNG files for collage
+            var allPngFiles = targetFolder.getFiles("*.png");
+            
+            if (allPngFiles.length === 0) {
+                alert("No PNG files found in the selected folder.");
+                // Close the document since no files were found
+                doc.close(SaveOptions.DONOTSAVECHANGES);
+                return;
+            }
+            
+            // Create tiled collage with all PNG files
+            createTiledCollage(doc, allPngFiles, targetFolder, folderName);
+        } else {
+            // Create model sheet with custom layout
+            createCustomModelSheet(doc, matchedFiles, targetFolder, folderName);
         }
-        
-        // Create model sheet with custom layout
-        createCustomModelSheet(doc, matchedFiles, targetFolder, folderName);
         
         // Save the document to the source folder (PSD and JPG)
         var saveFileName = docName + ".psd";
@@ -235,6 +247,142 @@ function createCustomModelSheet(doc, matchedFiles, targetFolder, folderName) {
         // Restore original ruler units
         app.preferences.rulerUnits = originalRulerUnits;
     }
+}
+
+/**
+ * Create a tiled collage layout with all PNG files
+ * @param {Document} doc - The active Photoshop document
+ * @param {Array} allPngFiles - Array of all PNG files in the folder
+ * @param {Folder} targetFolder - The source folder containing PNG files
+ * @param {String} folderName - The name of the source folder
+ */
+function createTiledCollage(doc, allPngFiles, targetFolder, folderName) {
+    // Set up document units
+    var originalRulerUnits = app.preferences.rulerUnits;
+    app.preferences.rulerUnits = Units.PIXELS;
+    
+    try {
+        var docWidth = 2048;
+        var docHeight = 2048;
+        
+        // Create 50% gray background layer
+        createGrayBackground(doc);
+        
+        // Calculate optimal grid layout based on number of files
+        var numFiles = allPngFiles.length;
+        var gridLayout = calculateOptimalGrid(numFiles);
+        var cols = gridLayout.cols;
+        var rows = gridLayout.rows;
+        
+        // Calculate cell dimensions with padding
+        var padding = 20; // Padding between images
+        var cellWidth = (docWidth - (padding * (cols + 1))) / cols;
+        var cellHeight = (docHeight - (padding * (rows + 1))) / rows;
+        
+        // Create array of file info objects
+        var fileInfos = [];
+        for (var i = 0; i < allPngFiles.length; i++) {
+            var file = allPngFiles[i];
+            fileInfos.push({
+                file: file,
+                keyword: getFileNameWithoutExtension(file.name),
+                fileName: file.name
+            });
+        }
+        
+        // Shuffle files for more interesting layout
+        fileInfos = shuffleArray(fileInfos);
+        
+        // Place images in grid
+        for (var i = 0; i < Math.min(fileInfos.length, cols * rows); i++) {
+            var fileInfo = fileInfos[i];
+            
+            // Calculate grid position
+            var col = i % cols;
+            var row = Math.floor(i / cols);
+            
+            // Calculate center position for this cell
+            var x = padding + (col * (cellWidth + padding)) + (cellWidth / 2);
+            var y = padding + (row * (cellHeight + padding)) + (cellHeight / 2);
+            
+            // Add some variation to make it look more organic
+            var variation = Math.min(cellWidth, cellHeight) * 0.1; // 10% variation
+            var xOffset = (Math.random() - 0.5) * variation;
+            var yOffset = (Math.random() - 0.5) * variation;
+            
+            x += xOffset;
+            y += yOffset;
+            
+            // Ensure position stays within bounds
+            x = Math.max(cellWidth / 2, Math.min(docWidth - cellWidth / 2, x));
+            y = Math.max(cellHeight / 2, Math.min(docHeight - cellHeight / 2, y));
+            
+            // Create smart object with some size variation for visual interest
+            var sizeVariation = 0.8 + (Math.random() * 0.4); // 80% to 120% of cell size
+            var targetWidth = cellWidth * sizeVariation;
+            var targetHeight = cellHeight * sizeVariation;
+            
+            createSmartObjectLayer(doc, fileInfo, x, y, targetWidth, targetHeight);
+        }
+        
+    } finally {
+        // Restore original ruler units
+        app.preferences.rulerUnits = originalRulerUnits;
+    }
+}
+
+/**
+ * Calculate optimal grid layout based on number of items
+ * @param {Number} numItems - Number of items to arrange
+ * @returns {Object} Object with cols and rows properties
+ */
+function calculateOptimalGrid(numItems) {
+    if (numItems <= 1) return {cols: 1, rows: 1};
+    if (numItems <= 4) return {cols: 2, rows: 2};
+    if (numItems <= 9) return {cols: 3, rows: 3};
+    if (numItems <= 16) return {cols: 4, rows: 4};
+    if (numItems <= 25) return {cols: 5, rows: 5};
+    if (numItems <= 36) return {cols: 6, rows: 6};
+    
+    // For larger numbers, calculate a roughly square grid
+    var cols = Math.ceil(Math.sqrt(numItems));
+    var rows = Math.ceil(numItems / cols);
+    
+    // Prefer slightly wider grids (more cols than rows) for better visual balance
+    if (rows > cols) {
+        var temp = cols;
+        cols = rows;
+        rows = temp;
+    }
+    
+    return {cols: cols, rows: rows};
+}
+
+/**
+ * Get filename without extension
+ * @param {String} fileName - The full filename
+ * @returns {String} Filename without extension
+ */
+function getFileNameWithoutExtension(fileName) {
+    var lastDotIndex = fileName.lastIndexOf('.');
+    if (lastDotIndex === -1) return fileName;
+    return fileName.substring(0, lastDotIndex);
+}
+
+/**
+ * Shuffle array using Fisher-Yates algorithm
+ * @param {Array} array - Array to shuffle
+ * @returns {Array} Shuffled array
+ */
+function shuffleArray(array) {
+    var shuffled = array.slice(); // Create a copy
+    for (var i = shuffled.length - 1; i > 0; i--) {
+        var j = Math.floor(Math.random() * (i + 1));
+        var temp = shuffled[i];
+        shuffled[i] = shuffled[j];
+        shuffled[j] = temp;
+    }
+    return shuffled;
 }
 
 /**

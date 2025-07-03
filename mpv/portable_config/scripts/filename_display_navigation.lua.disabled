@@ -1,5 +1,6 @@
--- filename_display_navigation.lua
+-- filename_display_navigation.lua.disabled
 -- Script to show filename when navigating with up/down keys and hide after 1 second
+-- DISABLED: This functionality is now handled by copy_remove_attempt_suffix.lua
 
 local msg = require 'mp.msg'
 

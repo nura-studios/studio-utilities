@@ -1,18 +1,20 @@
 -- copy_remove_attempt_suffix.lua
 -- Script to copy files with "_attempt_##" suffix and remove the suffix from the new filename
--- Also includes toggle to hide/show attempt files in playlist
+-- Also includes variant mode toggle that rebuilds playlist to show/hide attempt files
 
 local utils = require 'mp.utils'
 local msg = require 'mp.msg'
 
--- Global state for playlist filtering
-local attempt_files_hidden = false
+-- Global state for variant mode
+local variant_mode_on = false  -- OFF by default - show all files
 local help_visible = false
-local interaction_mode = nil  -- "image", "video", "audio"
+local current_directory = nil
+local rebuilding_playlist = false
+local force_rebuild = false
 local media_extensions = {
     image = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff", ".tga"},
     video = {".mp4", ".avi", ".mkv", ".mov", ".wmv", ".flv", ".webm", ".m4v", ".mpg", ".mpeg"},
-    audio = {".mp3", ".wav", ".flac", ".ogg", ".aac", ".m4a", ".wma"}
+    audio = {".wav", ".aac", ".mp3"}
 }
 
 function detect_file_type(filename)
@@ -34,99 +36,665 @@ function detect_file_type(filename)
     return nil
 end
 
-function set_interaction_mode()
-    local current_path = mp.get_property("path")
-    if not current_path then return end
+function has_attempt_suffix(filename)
+    -- Extract filename without directory
+    local name_only = filename:match("([^/\\]+)$") or filename
     
-    local filename = current_path:match("([^/\\]+)$")
-    local file_type = detect_file_type(filename)
+    -- Extract name without extension
+    local name_without_ext = name_only:match("^(.+)%.[^%.]+$") or name_only
     
-    if file_type and file_type ~= interaction_mode then
-        interaction_mode = file_type
-        msg.info("Interaction mode set to: " .. interaction_mode)
-        mp.osd_message("Mode: " .. interaction_mode:upper(), 2)
-        setup_mode_bindings()
-    end
+    -- Check for "_attempt_##" pattern
+    return name_without_ext:match("_attempt_%d+$") ~= nil
 end
 
-function get_filtered_playlist_indices(media_type)
-    local playlist = mp.get_property_native("playlist")
-    if not playlist then return {} end
+function is_media_file(filename)
+    local ext = filename:match("%.([^%.]+)$")
+    if not ext then return false end
     
-    local indices = {}
-    for i, entry in ipairs(playlist) do
-        if entry.filename then
-            local file_type = detect_file_type(entry.filename)
-            if file_type == media_type then
-                table.insert(indices, i - 1)  -- MPV uses 0-based indexing
+    ext = "." .. ext:lower()
+    
+    for _, extensions in pairs(media_extensions) do
+        for _, extension in ipairs(extensions) do
+            if ext == extension then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+function get_directory_files(directory)
+    local files = {}
+    
+    -- Use utils.readdir for better performance and no window flashing
+    local dir_files = utils.readdir(directory, "files")
+    if not dir_files then
+        return files
+    end
+    
+    -- Convert to full paths and filter media files
+    for _, filename in ipairs(dir_files) do
+        if filename and is_media_file(filename) then
+            local filepath = directory .. "\\" .. filename
+            table.insert(files, filepath)
+        end
+    end
+    
+    -- Sort files alphabetically
+    table.sort(files, function(a, b)
+        local name_a = a:match("([^\\]+)$"):lower()
+        local name_b = b:match("([^\\]+)$"):lower()
+        return name_a < name_b
+    end)
+    
+    return files
+end
+
+function rebuild_playlist()
+    -- Prevent recursive rebuilding
+    if rebuilding_playlist then
+        msg.info("Playlist rebuild already in progress, skipping")
+        return
+    end
+    
+    local current_path = mp.get_property("path")
+    if not current_path then
+        msg.info("No current file, cannot rebuild playlist")
+        return
+    end
+    
+    rebuilding_playlist = true
+    
+    -- Get current directory
+    local dir = current_path:match("(.+)[/\\][^/\\]+$")
+    if not dir then
+        msg.info("Cannot determine current directory")
+        rebuilding_playlist = false
+        return
+    end
+    
+    -- Check if directory has changed
+    if current_directory and current_directory == dir and not force_rebuild then
+        msg.info("Same directory and no force rebuild requested, skipping")
+        rebuilding_playlist = false
+        return
+    end
+    
+    current_directory = dir
+    local current_filename = current_path:match("([^/\\]+)$")
+    
+
+    
+    -- Get all media files in directory
+    local all_files = get_directory_files(dir)
+    
+    if #all_files == 0 then
+        msg.info("No media files found in directory")
+        rebuilding_playlist = false
+        return
+    end
+    
+    -- Filter files based on variant mode
+    local filtered_files = {}
+    for _, filepath in ipairs(all_files) do
+        local filename = filepath:match("([^\\]+)$")
+        if variant_mode_on then
+            -- Include all files (show variants)
+            table.insert(filtered_files, filepath)
+        else
+            -- Only include files WITHOUT attempt suffix (main files only)
+            if not has_attempt_suffix(filename) then
+                table.insert(filtered_files, filepath)
             end
         end
     end
     
-    return indices
-end
-
-function navigate_filtered_playlist(direction)
-    if not interaction_mode then return end
+    if #filtered_files == 0 then
+        mp.osd_message("No files to display in current variant mode", 3)
+        rebuilding_playlist = false
+        return
+    end
     
-    local indices = get_filtered_playlist_indices(interaction_mode)
-    if #indices <= 1 then return end
+    -- Find current file position in new playlist before rebuilding
+    local current_index = 0
+    local found_current_file = false
+    local target_filename = current_filename
     
-    local current_pos = mp.get_property_number("playlist-pos") or 0
-    local current_index = nil
-    
-    -- Find current position in filtered list
-    for i, idx in ipairs(indices) do
-        if idx == current_pos then
-            current_index = i
+    -- Check if current file will be in new playlist
+    for i, filepath in ipairs(filtered_files) do
+        local filename = filepath:match("([^\\]+)$")
+        if filename == current_filename then
+            current_index = i - 1 -- MPV uses 0-based indexing
+            found_current_file = true
             break
         end
     end
     
-    if not current_index then return end
-    
-    local next_index
-    if direction == "next" then
-        next_index = current_index < #indices and current_index + 1 or 1  -- Loop to first
-    else
-        next_index = current_index > 1 and current_index - 1 or #indices  -- Loop to last
-    end
-    
-    local target_pos = indices[next_index]
-    mp.set_property("playlist-pos", target_pos)
-    
-    msg.info("Navigated to " .. interaction_mode .. " file at position: " .. target_pos)
-end
-
-function setup_mode_bindings()
-    if not interaction_mode then return end
-    
-    -- Remove existing mouse wheel bindings
-    mp.remove_key_binding("wheel_frame_back")
-    mp.remove_key_binding("wheel_frame_forward") 
-    mp.remove_key_binding("wheel_prev_media")
-    mp.remove_key_binding("wheel_next_media")
-    mp.remove_key_binding("spacebar_next_image")
-    
-    if interaction_mode == "video" then
-        -- Video mode: mouse wheel = frame advance, up/down = filtered playlist
-        mp.add_key_binding("WHEEL_UP", "wheel_frame_back", function() mp.command("frame-back-step") end)
-        mp.add_key_binding("WHEEL_DOWN", "wheel_frame_forward", function() mp.command("frame-step") end)
-        msg.info("Video mode: Mouse wheel = frame advance")
+    -- If current file is not in filtered list (e.g., attempt file when variant mode OFF)
+    -- Try to find the main file that corresponds to the current attempt file
+    if not found_current_file and has_attempt_suffix(current_filename) then
+        local main_filename = current_filename:gsub("_attempt_%d+", "")
+        msg.info("Current file not in filtered list, looking for main file: " .. main_filename)
         
-    elseif interaction_mode == "image" or interaction_mode == "audio" then
-        -- Image/Audio mode: mouse wheel = navigate filtered playlist
-        mp.add_key_binding("WHEEL_UP", "wheel_prev_media", function() navigate_filtered_playlist("prev") end)
-        mp.add_key_binding("WHEEL_DOWN", "wheel_next_media", function() navigate_filtered_playlist("next") end)
-        
-        if interaction_mode == "image" then
-            -- Spacebar also navigates for images
-            mp.add_key_binding("SPACE", "spacebar_next_image", function() navigate_filtered_playlist("next") end)
-            msg.info("Image mode: Mouse wheel + spacebar = navigate images")
-        else
-            msg.info("Audio mode: Mouse wheel = navigate audio files")
+        for i, filepath in ipairs(filtered_files) do
+            local filename = filepath:match("([^\\]+)$")
+            if filename == main_filename then
+                current_index = i - 1 -- MPV uses 0-based indexing
+                found_current_file = true
+                target_filename = main_filename
+                msg.info("Found main file at position: " .. current_index)
+                break
+            end
         end
     end
+    
+    -- Store current file info for preservation
+    local current_file_path = mp.get_property("path")
+    local current_time = mp.get_property_number("time-pos") or 0
+    
+
+    
+    -- Build playlist by loading first file and appending others
+    if #filtered_files > 0 then
+        -- Load first file to establish playlist
+        mp.commandv("loadfile", filtered_files[1], "replace")
+        
+        -- Append remaining files
+        for i = 2, #filtered_files do
+            mp.commandv("loadfile", filtered_files[i], "append")
+        end
+        
+        -- Set to correct position if current file is not the first
+        if current_index > 0 then
+            mp.set_property("playlist-pos", current_index)
+        end
+        
+                 -- For videos, restore time position
+         if current_time > 0 then
+             mp.add_timeout(0.1, function()
+                 mp.set_property("time-pos", current_time)
+             end)
+         end
+     end
+    
+    -- Reset flags
+    rebuilding_playlist = false
+    force_rebuild = false
+    
+    local mode_text = variant_mode_on and "variant mode ON (show variants)" or "variant mode OFF (main files only)"
+    local count_text = string.format("(%d files)", #filtered_files)
+    
+    -- Only show rebuild message if it was explicitly requested or if the current file changed
+    if force_rebuild or not found_current_file then
+        mp.osd_message(mode_text .. "\n" .. count_text, 1.5)
+    end
+    
+    msg.info(string.format("Rebuilt playlist: %s - %d files", mode_text, #filtered_files))
+end
+
+function navigate_playlist(direction)
+    -- Don't navigate during playlist rebuilding
+    if rebuilding_playlist then
+        return
+    end
+    
+    -- Simple navigation since playlist is already built on start
+    if direction == "next" then
+        mp.command("playlist-next")
+    else
+        mp.command("playlist-prev")
+    end
+    
+    -- Show filename on navigation with slight delay
+    mp.add_timeout(0.15, function()
+        local filename = mp.get_property("filename")
+        if filename then
+            mp.osd_message(filename, 1)
+        end
+    end)
+end
+
+function get_base_name_and_number(filename)
+    -- Remove extension
+    local name_without_ext = filename:match("^(.+)%.[^%.]+$") or filename
+    
+    -- Remove _attempt_## suffix if present
+    local base_with_number = name_without_ext:gsub("_attempt_%d+$", "")
+    
+    -- Find the last numeric sequence in the name
+    local base_name, number_str = base_with_number:match("^(.-)_?(%d+)$")
+    if not base_name or not number_str then
+        -- Try without underscore separator
+        base_name, number_str = base_with_number:match("^(.-)(%d+)$")
+    end
+    
+    if base_name and number_str then
+        local number = tonumber(number_str)
+        local padding = #number_str  -- Preserve zero padding
+        return base_name, number, padding
+    end
+    
+    return nil, nil, nil
+end
+
+function find_group_files(directory, base_name, number, padding, extension)
+    local files = {}
+    local number_str = string.format("%0" .. padding .. "d", number)
+    
+    -- Get all files in directory
+    local dir_files = utils.readdir(directory, "files")
+    if not dir_files then
+        return files
+    end
+    
+    for _, file in ipairs(dir_files) do
+        -- Check if file has the right extension
+        if file:lower():match(extension:lower() .. "$") then
+            local file_base, file_number, file_padding = get_base_name_and_number(file)
+            
+            -- Check if this file belongs to our group
+            if file_base == base_name and file_number == number then
+                table.insert(files, file)
+            end
+        end
+    end
+    
+    return files
+end
+
+function integrate_into_sequence(directory, filename, extension, position)
+    msg.info("Integrating file into sequence: " .. filename .. " at " .. position)
+    
+    -- Get all files in directory
+    local dir_files = utils.readdir(directory, "files")
+    if not dir_files then
+        msg.error("Cannot read directory")
+        return false
+    end
+    
+    -- Find similar files (same base pattern as current file)
+    local similar_files = find_similar_files(directory, filename, extension)
+    msg.info("Found " .. #similar_files .. " similar files")
+    
+    -- Find existing frame files and determine sequence info
+    local existing_frames = {}
+    local max_frame_number = 0
+    local frame_padding = 3  -- Default padding
+    
+    for _, file in ipairs(dir_files) do
+        if is_media_file(file) then
+            local base_name, number, padding = get_base_name_and_number(file)
+            if base_name and number and base_name:match("frame") then
+                existing_frames[number] = file
+                max_frame_number = math.max(max_frame_number, number)
+                frame_padding = padding
+            end
+        end
+    end
+    
+    msg.info("Found " .. max_frame_number .. " existing frames, padding: " .. frame_padding)
+    
+    if position == "beginning" then
+        return integrate_at_beginning(directory, similar_files, existing_frames, max_frame_number, frame_padding, extension)
+    else
+        return integrate_at_end(directory, similar_files, max_frame_number, frame_padding, extension)
+    end
+end
+
+function find_similar_files(directory, current_filename, extension)
+    local similar_files = {}
+    
+    -- Extract base name from current file (remove extension and any suffixes/numbers)
+    local base_name = current_filename:match("^([^.]+)")
+    -- Remove any trailing numbers, version indicators, etc.
+    base_name = base_name:gsub("_[vV]?%d+$", ""):gsub("_final$", ""):gsub("_draft$", "")
+    msg.info("Looking for files similar to base: " .. base_name)
+    
+    local dir_files = utils.readdir(directory, "files")
+    if not dir_files then
+        return similar_files
+    end
+    
+    for _, file in ipairs(dir_files) do
+        if file:lower():match(extension:lower() .. "$") then
+            local file_base = file:match("^([^.]+)")
+            -- Remove similar suffixes for comparison
+            file_base = file_base:gsub("_[vV]?%d+$", ""):gsub("_final$", ""):gsub("_draft$", "")
+            
+            -- Check if this file has the same base pattern, no existing frame prefix, and no attempt suffix
+            if file_base == base_name and not get_base_name_and_number(file) and not has_attempt_suffix(file) then
+                table.insert(similar_files, file)
+            end
+        end
+    end
+    
+    -- Sort for consistent ordering
+    table.sort(similar_files)
+    return similar_files
+end
+
+function integrate_at_beginning(directory, similar_files, existing_frames, max_frame_number, padding, extension)
+    msg.info("Integrating at beginning - shifting " .. max_frame_number .. " existing frames")
+    
+    -- Step 1: Shift all existing frames up by 1 (in reverse order to avoid conflicts)
+    for i = max_frame_number, 1, -1 do
+        if existing_frames[i] then
+            local old_path = directory .. "\\" .. existing_frames[i]
+            local new_number = i + 1
+            local new_filename = existing_frames[i]:gsub("_" .. string.format("%0" .. padding .. "d", i), "_" .. string.format("%0" .. padding .. "d", new_number))
+            
+            msg.info("Shifting frame: " .. existing_frames[i] .. " → " .. new_filename)
+            
+            local rename_cmd = string.format('Rename-Item -Path "%s" -NewName "%s" -ErrorAction Stop', 
+                old_path:gsub('"', '""'), new_filename:gsub('"', '""'))
+            
+            local result = utils.subprocess({
+                args = {"powershell", "-WindowStyle", "Hidden", "-Command", rename_cmd},
+                cancellable = false
+            })
+            
+            if result.status ~= 0 then
+                mp.osd_message("Failed to shift frame: " .. existing_frames[i])
+                msg.error("Rename failed: " .. existing_frames[i])
+                return false
+            end
+        end
+    end
+    
+    -- Step 2: Rename similar files to frame_001 group
+    local main_file = similar_files[1]  -- First file becomes the main file
+    local attempt_index = 1
+    
+    for i, file in ipairs(similar_files) do
+        local old_path = directory .. "\\" .. file
+        local new_filename
+        
+        if i == 1 then
+            -- First file becomes the main file
+            new_filename = "frame_" .. string.format("%0" .. padding .. "d", 1) .. extension
+        else
+            -- Other files become attempts
+            new_filename = "frame_" .. string.format("%0" .. padding .. "d", 1) .. "_attempt_" .. string.format("%02d", attempt_index) .. extension
+            attempt_index = attempt_index + 1
+        end
+        
+        msg.info("Renaming: " .. file .. " → " .. new_filename)
+        
+        local rename_cmd = string.format('Rename-Item -Path "%s" -NewName "%s" -ErrorAction Stop', 
+            old_path:gsub('"', '""'), new_filename:gsub('"', '""'))
+        
+        local result = utils.subprocess({
+            args = {"powershell", "-WindowStyle", "Hidden", "-Command", rename_cmd},
+            cancellable = false
+        })
+        
+        if result.status ~= 0 then
+            mp.osd_message("Failed to rename: " .. file)
+            msg.error("Rename failed: " .. file)
+            return false
+        end
+    end
+    
+    -- Rebuild playlist
+    mp.add_timeout(0.1, function()
+        force_rebuild = true
+        rebuild_playlist()
+    end)
+    
+    return true
+end
+
+function integrate_at_end(directory, similar_files, max_frame_number, padding, extension)
+    local new_frame_number = max_frame_number + 1
+    msg.info("Integrating at end - using frame number: " .. new_frame_number)
+    
+    -- Rename similar files to new frame group
+    local attempt_index = 1
+    
+    for i, file in ipairs(similar_files) do
+        local old_path = directory .. "\\" .. file
+        local new_filename
+        
+        if i == 1 then
+            -- First file becomes the main file
+            new_filename = "frame_" .. string.format("%0" .. padding .. "d", new_frame_number) .. extension
+        else
+            -- Other files become attempts
+            new_filename = "frame_" .. string.format("%0" .. padding .. "d", new_frame_number) .. "_attempt_" .. string.format("%02d", attempt_index) .. extension
+            attempt_index = attempt_index + 1
+        end
+        
+        msg.info("Renaming: " .. file .. " → " .. new_filename)
+        
+        local rename_cmd = string.format('Rename-Item -Path "%s" -NewName "%s" -ErrorAction Stop', 
+            old_path:gsub('"', '""'), new_filename:gsub('"', '""'))
+        
+        local result = utils.subprocess({
+            args = {"powershell", "-WindowStyle", "Hidden", "-Command", rename_cmd},
+            cancellable = false
+        })
+        
+        if result.status ~= 0 then
+            mp.osd_message("Failed to rename: " .. file)
+            msg.error("Rename failed: " .. file)
+            return false
+        end
+    end
+    
+    -- Rebuild playlist
+    mp.add_timeout(0.1, function()
+        force_rebuild = true
+        rebuild_playlist()
+    end)
+    
+    return true
+end
+
+function shift_media_forward()
+    local current_path = mp.get_property("path")
+    if not current_path then
+        mp.osd_message("No file currently playing")
+        return
+    end
+    
+    local dir = current_path:match("(.+)[/\\][^/\\]+$")
+    local filename = current_path:match("([^/\\]+)$")
+    local extension = "." .. (filename:match("%.([^%.]+)$") or "")
+    
+    if not dir or not filename then
+        mp.osd_message("Cannot parse file path")
+        return
+    end
+    
+    -- Show immediate feedback
+    mp.osd_message("Renaming...", 1)
+    
+    -- Get base name and number
+    local base_name, current_number, padding = get_base_name_and_number(filename)
+    if not base_name or not current_number then
+        -- File doesn't have frame prefix - integrate it into sequence at end
+        msg.info("File lacks frame prefix - integrating into sequence at end")
+        if integrate_into_sequence(dir, filename, extension, "end") then
+            mp.osd_message("Integrated file into sequence at end", 2)
+        end
+        return
+    end
+    
+    local next_number = current_number + 1
+    
+    -- Find current group and next group
+    local current_group = find_group_files(dir, base_name, current_number, padding, extension)
+    local next_group = find_group_files(dir, base_name, next_number, padding, extension)
+    
+    if #current_group == 0 then
+        mp.osd_message("No files found in current group")
+        return
+    end
+    
+    if #next_group == 0 then
+        mp.osd_message("No files found in next group to swap with")
+        return
+    end
+    
+    -- Perform the swap
+    perform_group_swap(dir, current_group, next_group, current_number, next_number, padding, base_name, extension)
+    
+    mp.osd_message(string.format("Shifted media forward: %03d ↔ %03d (%d+%d files)", current_number, next_number, #current_group, #next_group), 2)
+end
+
+function shift_media_backward()
+    local current_path = mp.get_property("path")
+    if not current_path then
+        mp.osd_message("No file currently playing")
+        return
+    end
+    
+    local dir = current_path:match("(.+)[/\\][^/\\]+$")
+    local filename = current_path:match("([^/\\]+)$")
+    local extension = "." .. (filename:match("%.([^%.]+)$") or "")
+    
+    if not dir or not filename then
+        mp.osd_message("Cannot parse file path")
+        return
+    end
+    
+    -- Show immediate feedback
+    mp.osd_message("Renaming...", 1)
+    
+    -- Get base name and number
+    local base_name, current_number, padding = get_base_name_and_number(filename)
+    if not base_name or not current_number then
+        -- File doesn't have frame prefix - integrate it into sequence at beginning
+        msg.info("File lacks frame prefix - integrating into sequence at beginning")
+        if integrate_into_sequence(dir, filename, extension, "beginning") then
+            mp.osd_message("Integrated file into sequence at beginning", 2)
+        end
+        return
+    end
+    
+    local prev_number = current_number - 1
+    if prev_number < 1 then
+        mp.osd_message("Cannot shift backward: already at first position")
+        return
+    end
+    
+    -- Find current group and previous group
+    local current_group = find_group_files(dir, base_name, current_number, padding, extension)
+    local prev_group = find_group_files(dir, base_name, prev_number, padding, extension)
+    
+    if #current_group == 0 then
+        mp.osd_message("No files found in current group")
+        return
+    end
+    
+    if #prev_group == 0 then
+        mp.osd_message("No files found in previous group to swap with")
+        return
+    end
+    
+    -- Perform the swap
+    perform_group_swap(dir, current_group, prev_group, current_number, prev_number, padding, base_name, extension)
+    
+    mp.osd_message(string.format("Shifted media backward: %03d ↔ %03d (%d+%d files)", current_number, prev_number, #current_group, #prev_group), 2)
+end
+
+function perform_group_swap(directory, group1, group2, number1, number2, padding, base_name, extension)
+    msg.info(string.format("Starting group swap: %d files in group1, %d files in group2", #group1, #group2))
+    msg.info("Group1 files: " .. table.concat(group1, ", "))
+    msg.info("Group2 files: " .. table.concat(group2, ", "))
+    msg.info("Note: ALL files (including attempt variants) will be swapped regardless of variant mode setting")
+    
+    -- Create unique temporary suffix to avoid naming conflicts
+    local temp_suffix = "_TEMP_SWAP_" .. os.time() .. "_" .. math.random(1000, 9999)
+    
+    local number1_str = string.format("%0" .. padding .. "d", number1)
+    local number2_str = string.format("%0" .. padding .. "d", number2)
+    
+    msg.info(string.format("Swapping numbers: %s ↔ %s", number1_str, number2_str))
+    
+    -- Step 1: Rename group1 to temporary names
+    msg.info("Step 1: Renaming group1 to temporary names")
+    for _, filename in ipairs(group1) do
+        local old_path = directory .. "\\" .. filename
+        local temp_filename = filename:gsub(number1_str, number1_str .. temp_suffix)
+        
+        msg.info("Renaming: " .. filename .. " → " .. temp_filename)
+        
+        local rename_cmd = string.format('Rename-Item -Path "%s" -NewName "%s" -ErrorAction Stop', 
+            old_path:gsub('"', '""'), temp_filename:gsub('"', '""'))
+        
+        local result = utils.subprocess({
+            args = {"powershell", "-WindowStyle", "Hidden", "-Command", rename_cmd},
+            cancellable = false
+        })
+        
+        if result.status ~= 0 then
+            mp.osd_message("Failed to rename: " .. filename)
+            msg.error("Rename failed: " .. filename .. " (Status: " .. result.status .. ")")
+            if result.stderr then msg.error("Error: " .. result.stderr) end
+            return false
+        end
+    end
+    
+    -- Step 2: Rename group2 to group1's numbers
+    msg.info("Step 2: Renaming group2 to group1's numbers")
+    for _, filename in ipairs(group2) do
+        local old_path = directory .. "\\" .. filename
+        local new_filename = filename:gsub(number2_str, number1_str)
+        
+        msg.info("Renaming: " .. filename .. " → " .. new_filename)
+        
+        local rename_cmd = string.format('Rename-Item -Path "%s" -NewName "%s" -ErrorAction Stop', 
+            old_path:gsub('"', '""'), new_filename:gsub('"', '""'))
+        
+        local result = utils.subprocess({
+            args = {"powershell", "-WindowStyle", "Hidden", "-Command", rename_cmd},
+            cancellable = false
+        })
+        
+        if result.status ~= 0 then
+            mp.osd_message("Failed to rename: " .. filename)
+            msg.error("Rename failed: " .. filename .. " (Status: " .. result.status .. ")")
+            if result.stderr then msg.error("Error: " .. result.stderr) end
+            return false
+        end
+    end
+    
+    -- Step 3: Rename temp group1 to group2's numbers
+    msg.info("Step 3: Renaming temp group1 to group2's numbers")
+    for _, filename in ipairs(group1) do
+        local temp_filename = filename:gsub(number1_str, number1_str .. temp_suffix)
+        local final_filename = filename:gsub(number1_str, number2_str)
+        
+        msg.info("Renaming: " .. temp_filename .. " → " .. final_filename)
+        
+        local temp_path = directory .. "\\" .. temp_filename
+        
+        local rename_cmd = string.format('Rename-Item -Path "%s" -NewName "%s" -ErrorAction Stop', 
+            temp_path:gsub('"', '""'), final_filename:gsub('"', '""'))
+        
+        local result = utils.subprocess({
+            args = {"powershell", "-WindowStyle", "Hidden", "-Command", rename_cmd},
+            cancellable = false
+        })
+        
+        if result.status ~= 0 then
+            mp.osd_message("Failed to rename: " .. temp_filename)
+            msg.error("Rename failed: " .. temp_filename .. " (Status: " .. result.status .. ")")
+            if result.stderr then msg.error("Error: " .. result.stderr) end
+            return false
+        end
+    end
+    
+    msg.info("Group swap completed successfully")
+    
+    -- Rebuild playlist after successful swap
+    mp.add_timeout(0.5, function()
+        force_rebuild = true
+        rebuild_playlist()
+    end)
+    
+    return true
 end
 
 function copy_remove_attempt_suffix()
@@ -193,55 +761,6 @@ function copy_remove_attempt_suffix()
     end
 end
 
-function has_attempt_suffix(filename)
-    -- Extract filename without directory
-    local name_only = filename:match("([^/\\]+)$") or filename
-    
-    -- Extract name without extension
-    local name_without_ext = name_only:match("^(.+)%.[^%.]+$") or name_only
-    
-    -- Check for "_attempt_##" pattern
-    return name_without_ext:match("_attempt_%d+$") ~= nil
-end
-
-function toggle_attempt_files_visibility()
-    local playlist = mp.get_property_native("playlist")
-    if not playlist then
-        mp.osd_message("No playlist available", 2)
-        return
-    end
-    
-    attempt_files_hidden = not attempt_files_hidden
-    
-    if attempt_files_hidden then
-        -- Hide attempt files by removing them from playlist
-        local indices_to_remove = {}
-        
-        -- Collect indices of files to remove (in reverse order to avoid index shifting)
-        for i = #playlist, 1, -1 do
-            local entry = playlist[i]
-            if entry.filename and has_attempt_suffix(entry.filename) then
-                table.insert(indices_to_remove, i - 1) -- MPV uses 0-based indexing
-            end
-        end
-        
-        -- Remove the files from playlist
-        for _, index in ipairs(indices_to_remove) do
-            mp.commandv("playlist-remove", index)
-        end
-        
-        local count = #indices_to_remove
-        -- Show timed OSD message for variant mode ON
-        mp.osd_message(string.format("\\ variant mode ON\nHidden %d attempt files", count), 3)
-        msg.info(string.format("Hidden %d attempt files from playlist", count))
-        
-    else
-        -- Show timed OSD message for variant mode OFF
-        mp.osd_message("\\ variant mode OFF\nShowing all files (reload playlist to restore attempt files)", 3)
-        msg.info("Toggle off - showing all files. Note: Removed attempt files need playlist reload to restore.")
-    end
-end
-
 function move_to_trash()
     local current_path = mp.get_property("path")
     if not current_path then
@@ -288,6 +807,8 @@ function move_to_trash()
             if result.status == 0 then
                 mp.osd_message("Previous file moved to recycle bin", 1)
                 msg.info("File successfully moved to recycle bin: " .. file_to_delete)
+                -- Rebuild playlist after deletion
+                mp.add_timeout(0.5, rebuild_playlist)
             else
                 mp.osd_message("Failed to move previous file to trash")
                 msg.error("Trash operation failed with status: " .. tostring(result.status))
@@ -374,6 +895,8 @@ function rename_current_file()
                 msg.info("File renamed successfully")
                 -- Update the current file path in MPV
                 mp.set_property("path", new_path)
+                -- Rebuild playlist after rename
+                mp.add_timeout(0.5, rebuild_playlist)
             else
                 mp.osd_message("Failed to rename file")
                 msg.error("Rename operation failed with status: " .. tostring(result.status))
@@ -478,20 +1001,31 @@ function show_custom_help()
 s              - Select: Copy file without '_attempt_##' suffix
 ctrl+s         - Take numbered snapshot
 ctrl+c         - Copy current frame to clipboard
-\              - Toggle attempt files visibility (variant mode)
+ctrl+r         - Manually rebuild playlist
+\              - Toggle variant mode (rebuilds playlist)
 DEL            - Move current file to recycle bin
 F2             - Rename current file
 h              - Show/hide this help
 Enter          - Toggle fullscreen
 Middle click   - Toggle fullscreen
 Left/Right     - Frame advance (default MPV behavior)
-Up/Down        - Navigate filtered by media type
-Alt+wheel      - Navigate filtered by media type
+Up/Down        - Navigate playlist (simple prev/next)
+ctrl+Left      - Shift media backward (swap with previous group)
+ctrl+Right     - Shift media forward (swap with next group)
 
-SMART MODES (auto-detected):
-VIDEO: Mouse wheel = frame advance
-IMAGE: Mouse wheel + spacebar = navigate images only
-AUDIO: Mouse wheel = navigate audio files only
+VARIANT MODE:
+AUTO: Set based on starting file (attempt file → ON, main file → OFF)
+OFF: Playlist contains main files only (no '_attempt_##' files)
+ON: Playlist contains all files including variants
+
+MEDIA SHIFTING:
+For files with frame prefix: Swaps current file group (main + attempts) with next/previous group
+Example: frame_002.png + attempts ↔ frame_003.png + attempts
+
+For files without frame prefix: Integrates into sequence
+ctrl+Left: Insert at beginning (becomes frame_001, shifts existing frames up)
+ctrl+Right: Insert at end (becomes frame_004 after existing frame_003)
+Similar files become attempts: random_image.png → frame_004.png, random_image_v2.png → frame_004_attempt_01.png
 
 Press 'h' again to hide this help]]
 
@@ -509,60 +1043,39 @@ Press 'h' again to hide this help]]
     end)
 end
 
-function hide_help()
-    if help_visible then
-        mp.osd_message("", 0)
-        help_visible = false
-        msg.info("Help hidden")
+function toggle_variant_mode()
+    -- Prevent toggle during navigation
+    if rebuilding_playlist then
+        mp.osd_message("Please wait, playlist operation in progress", 1)
+        return
     end
-end
-
--- Function to handle any key press and hide help
-function on_key_press()
-    if help_visible then
-        hide_help()
+    
+    variant_mode_on = not variant_mode_on
+    
+    if variant_mode_on then
+        mp.osd_message("\\ variant mode ON\n(variants now visible)", 1.5)
+        msg.info("Variant mode ON - rebuilding playlist to show variants")
+    else
+        mp.osd_message("\\ variant mode OFF\n(main files only)", 1.5)
+        msg.info("Variant mode OFF - rebuilding playlist to show main files only")
     end
+    
+    -- Force rebuild and then rebuild (shorter delay for mode toggle)
+    force_rebuild = true
+    mp.add_timeout(0.1, rebuild_playlist)
 end
 
 function playlist_prev_loop()
-    local playlist_count = mp.get_property_number("playlist-count") or 0
-    local current_pos = mp.get_property_number("playlist-pos") or 0
-    
-    if playlist_count <= 1 then
-        return  -- No point in looping with 1 or no files
-    end
-    
-    if current_pos <= 0 then
-        -- At first item, loop to last
-        mp.set_property("playlist-pos", playlist_count - 1)
-        msg.info("Looped to end of playlist")
-    else
-        -- Normal previous
-        mp.command("playlist-prev")
-    end
+    navigate_playlist("prev")
 end
 
 function playlist_next_loop()
-    local playlist_count = mp.get_property_number("playlist-count") or 0
-    local current_pos = mp.get_property_number("playlist-pos") or 0
-    
-    if playlist_count <= 1 then
-        return  -- No point in looping with 1 or no files
-    end
-    
-    if current_pos >= playlist_count - 1 then
-        -- At last item, loop to first
-        mp.set_property("playlist-pos", 0)
-        msg.info("Looped to start of playlist")
-    else
-        -- Normal next
-        mp.command("playlist-next")
-    end
+    navigate_playlist("next")
 end
 
 -- Register the functions to be called by hotkeys
 mp.add_key_binding("s", "copy_remove_attempt_suffix", copy_remove_attempt_suffix)
-mp.add_key_binding("\\", "toggle_attempt_files", toggle_attempt_files_visibility)
+mp.add_key_binding("\\", "toggle_variant_mode", toggle_variant_mode)
 mp.add_key_binding("DEL", "move_to_trash", move_to_trash)
 mp.add_key_binding("F2", "rename_file", rename_current_file)
 mp.add_key_binding("ctrl+s", "save_custom_snapshot", save_custom_snapshot)
@@ -571,21 +1084,77 @@ mp.add_key_binding("ctrl+c", "copy_frame_clipboard", function()
     mp.osd_message("Frame copied to clipboard", 1)
 end)
 mp.add_key_binding("h", "show_custom_help", show_custom_help)
+mp.add_key_binding("ctrl+r", "manual_rebuild_playlist", function()
+    mp.osd_message("Manually rebuilding playlist...", 1)
+    force_rebuild = true
+    rebuild_playlist()
+end)
+mp.add_key_binding("ctrl+RIGHT", "shift_media_forward", shift_media_forward)
+mp.add_key_binding("ctrl+LEFT", "shift_media_backward", shift_media_backward)
 
 -- Fullscreen toggle bindings
 mp.add_key_binding("MBTN_MID", "toggle_fullscreen_mouse", function() mp.command("cycle fullscreen") end)
 mp.add_key_binding("ENTER", "toggle_fullscreen_enter", function() mp.command("cycle fullscreen") end)
 
--- Override up/down keys to use filtered navigation
-mp.add_key_binding("UP", "filtered_prev", function() navigate_filtered_playlist("prev") end)
-mp.add_key_binding("DOWN", "filtered_next", function() navigate_filtered_playlist("next") end)
+-- Simple up/down navigation (playlist is already filtered)
+mp.add_key_binding("UP", "navigate_prev", function() navigate_playlist("prev") end)
+mp.add_key_binding("DOWN", "navigate_next", function() navigate_playlist("next") end)
 
--- Alt + wheel: still does filtered playlist navigation
-mp.add_key_binding("Alt+WHEEL_UP", "alt_wheel_prev", function() navigate_filtered_playlist("prev") end)
-mp.add_key_binding("Alt+WHEEL_DOWN", "alt_wheel_next", function() navigate_filtered_playlist("next") end)
+-- Mouse wheel navigation for images (restore standard behavior)
+mp.add_key_binding("WHEEL_UP", "wheel_prev", function() navigate_playlist("prev") end)
+mp.add_key_binding("WHEEL_DOWN", "wheel_next", function() navigate_playlist("next") end)
 
--- Set up interaction mode when file loads
-mp.register_event("file-loaded", set_interaction_mode)
+-- Alt + wheel for manual navigation (alternative)
+mp.add_key_binding("Alt+WHEEL_UP", "alt_wheel_prev", function() navigate_playlist("prev") end)
+mp.add_key_binding("Alt+WHEEL_DOWN", "alt_wheel_next", function() navigate_playlist("next") end)
+
+-- Rebuild playlist on start, but preserve the current file
+mp.register_event("start-file", function()
+    local current_path = mp.get_property("path")
+    if current_path then
+        local dir = current_path:match("(.+)[/\\][^/\\]+$")
+        local filename = current_path:match("([^/\\]+)$")
+        
+        if dir and filename then
+            -- Check if this is a new directory or single file load
+            local playlist_count = mp.get_property_number("playlist-count") or 0
+            local is_new_directory = (dir ~= current_directory)
+            
+            -- Update current directory
+            current_directory = dir
+            msg.info("Directory set to: " .. dir)
+            
+            if playlist_count <= 1 or is_new_directory then
+                -- Auto-set variant mode based on starting file
+                local has_attempt = has_attempt_suffix(filename)
+                local old_variant_mode = variant_mode_on
+                
+                if has_attempt then
+                    variant_mode_on = true
+                    msg.info("Start file has attempt suffix - setting variant mode ON")
+                else
+                    variant_mode_on = false
+                    msg.info("Start file is main file - setting variant mode OFF")
+                end
+                
+                -- Only show mode change message if it actually changed
+                if old_variant_mode ~= variant_mode_on then
+                    local mode_text = variant_mode_on and "Variant mode ON (show variants)" or "Variant mode OFF (main files only)"
+                    mp.osd_message(mode_text, 1.5)
+                end
+                
+                msg.info("Rebuilding playlist on start (preserving current file)")
+                -- Very short delay to let file load, then rebuild while preserving position
+                mp.add_timeout(0.015, function()
+                    force_rebuild = true
+                    rebuild_playlist()
+                end)
+            end
+        end
+    end
+end)
 
 -- Initial setup
-mp.add_timeout(0.1, set_interaction_mode) 
+mp.add_timeout(0.1, function()
+    msg.info("Variant mode initialized: AUTO (ON=show variants, OFF=main files only)")
+end) 
