@@ -11,10 +11,12 @@ local help_visible = false
 local current_directory = nil
 local rebuilding_playlist = false
 local force_rebuild = false
+local current_media_type = nil  -- Track current media type for smart modes
+
 local media_extensions = {
-    image = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff", ".tga"},
+    image = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff", ".tga", ".psd"},
     video = {".mp4", ".avi", ".mkv", ".mov", ".wmv", ".flv", ".webm", ".m4v", ".mpg", ".mpeg"},
-    audio = {".wav", ".aac", ".mp3"}
+    audio = {".mp3", ".wav", ".flac", ".ogg", ".aac", ".m4a", ".wma"}
 }
 
 function detect_file_type(filename)
@@ -34,6 +36,98 @@ function detect_file_type(filename)
     end
     
     return nil
+end
+
+function update_media_type()
+    local current_path = mp.get_property("path")
+    if current_path then
+        local filename = current_path:match("([^/\\]+)$")
+        current_media_type = detect_file_type(filename)
+    end
+end
+
+-- Smart navigation based on media type
+function smart_navigate(direction)
+    if rebuilding_playlist then
+        return
+    end
+    
+    update_media_type()
+    
+    if current_media_type == "video" then
+        -- Video mode: frame-by-frame navigation (pause first if playing)
+        local paused = mp.get_property_bool("pause")
+        
+        if not paused then
+            -- Auto-pause if playing
+            mp.command("set pause yes")
+        end
+        
+        -- Frame-by-frame navigation (same as arrow keys)
+        if direction == "next" then
+            mp.command("frame-step")
+            mp.osd_message("Frame →", 0.5)
+        else
+            mp.command("frame-back-step")
+            mp.osd_message("← Frame", 0.5)
+        end
+    else
+        -- Image and audio modes: navigate through playlist
+        navigate_playlist(direction)
+    end
+end
+
+-- Navigate through specific media type only
+function navigate_media_type(direction)
+    if rebuilding_playlist then
+        return
+    end
+    
+    update_media_type()
+    
+    if not current_media_type then
+        navigate_playlist(direction)
+        return
+    end
+    
+    local playlist_count = mp.get_property_number("playlist-count") or 0
+    local current_pos = mp.get_property_number("playlist-pos") or 0
+    
+    -- Find next/prev file of same media type with looping
+    local step = direction == "next" and 1 or -1
+    local target_pos = current_pos + step
+    local searched_positions = {}
+    
+    -- Search with looping
+    while #searched_positions < playlist_count do
+        -- Handle looping
+        if target_pos >= playlist_count then
+            target_pos = 0
+        elseif target_pos < 0 then
+            target_pos = playlist_count - 1
+        end
+        
+        -- Avoid infinite loops
+        if searched_positions[target_pos] then
+            break
+        end
+        searched_positions[target_pos] = true
+        
+        -- Check if this position has the same media type
+        local playlist_item = mp.get_property("playlist/" .. target_pos .. "/filename")
+        if playlist_item then
+            local filename = playlist_item:match("([^/\\]+)$")
+            if detect_file_type(filename) == current_media_type then
+                mp.set_property("playlist-pos", target_pos)
+                return
+            end
+        end
+        
+        target_pos = target_pos + step
+    end
+    
+    -- If no other file of same type found, stay at current position
+    mp.osd_message("Only " .. current_media_type .. " file in playlist", 1)
 end
 
 function has_attempt_suffix(filename)
@@ -93,7 +187,6 @@ end
 function rebuild_playlist()
     -- Prevent recursive rebuilding
     if rebuilding_playlist then
-        msg.info("Playlist rebuild already in progress, skipping")
         return
     end
     
@@ -120,6 +213,14 @@ function rebuild_playlist()
         return
     end
     
+    -- Don't rebuild during normal playback
+    local pause_state = mp.get_property_bool("pause")
+    local playback_time = mp.get_property_number("time-pos") or 0
+    if not force_rebuild and not pause_state and playback_time > 0 then
+        rebuilding_playlist = false
+        return
+    end
+    
     current_directory = dir
     local current_filename = current_path:match("([^/\\]+)$")
     
@@ -134,17 +235,22 @@ function rebuild_playlist()
         return
     end
     
-    -- Filter files based on variant mode
+    -- Filter files based on media type and variant mode
     local filtered_files = {}
     for _, filepath in ipairs(all_files) do
         local filename = filepath:match("([^\\]+)$")
-        if variant_mode_on then
-            -- Include all files (show variants)
-            table.insert(filtered_files, filepath)
-        else
-            -- Only include files WITHOUT attempt suffix (main files only)
-            if not has_attempt_suffix(filename) then
+        local file_media_type = detect_file_type(filename)
+        
+        -- Only include files of the same media type as current file
+        if file_media_type == current_media_type then
+            if variant_mode_on then
+                -- Include all files of same media type (show variants)
                 table.insert(filtered_files, filepath)
+            else
+                -- Only include files WITHOUT attempt suffix (main files only)
+                if not has_attempt_suffix(filename) then
+                    table.insert(filtered_files, filepath)
+                end
             end
         end
     end
@@ -221,15 +327,16 @@ function rebuild_playlist()
     rebuilding_playlist = false
     force_rebuild = false
     
+    local media_type_text = current_media_type and (current_media_type:upper() .. " files") or "files"
     local mode_text = variant_mode_on and "variant mode ON (show variants)" or "variant mode OFF (main files only)"
-    local count_text = string.format("(%d files)", #filtered_files)
+    local count_text = string.format("(%d %s)", #filtered_files, media_type_text:lower())
     
     -- Only show rebuild message if it was explicitly requested or if the current file changed
     if force_rebuild or not found_current_file then
-        mp.osd_message(mode_text .. "\n" .. count_text, 1.5)
+        mp.osd_message(media_type_text .. " - " .. mode_text .. "\n" .. count_text, 1.5)
     end
     
-    msg.info(string.format("Rebuilt playlist: %s - %d files", mode_text, #filtered_files))
+    msg.info(string.format("Rebuilt playlist: %s - %s - %d files", media_type_text, mode_text, #filtered_files))
 end
 
 function navigate_playlist(direction)
@@ -238,11 +345,29 @@ function navigate_playlist(direction)
         return
     end
     
-    -- Simple navigation since playlist is already built on start
+    -- Get current playlist info
+    local playlist_count = mp.get_property_number("playlist-count") or 0
+    local current_pos = mp.get_property_number("playlist-pos") or 0
+    
+    if playlist_count <= 1 then
+        return -- Nothing to navigate
+    end
+    
+    -- Navigation with looping
     if direction == "next" then
-        mp.command("playlist-next")
+        if current_pos >= playlist_count - 1 then
+            -- At last item, loop to first
+            mp.set_property("playlist-pos", 0)
+        else
+            mp.command("playlist-next")
+        end
     else
-        mp.command("playlist-prev")
+        if current_pos <= 0 then
+            -- At first item, loop to last
+            mp.set_property("playlist-pos", playlist_count - 1)
+        else
+            mp.command("playlist-prev")
+        end
     end
     
     -- Show filename on navigation with slight delay
@@ -1013,8 +1138,23 @@ Up/Down        - Navigate playlist (simple prev/next)
 ctrl+Left      - Shift media backward (swap with previous group)
 ctrl+Right     - Shift media forward (swap with next group)
 
-VARIANT MODE:
-AUTO: Set based on starting file (attempt file → ON, main file → OFF)
+SMART INTERACTION MODES (Auto-detected, no display):
+🎬 VIDEO: Mouse wheel = pause + frame-by-frame navigation (like arrow keys)
+🖼️ IMAGE: Mouse wheel = navigate images (with looping), Spacebar = next image  
+🎵 AUDIO: Mouse wheel = navigate audio files (with looping)
+
+NAVIGATION:
+Mouse wheel    - Smart navigation (adapts to media type)
+                 Videos: Auto-pause + frame-by-frame (same as Left/Right arrows)
+                 Images/Audio: Navigate through playlist (with looping)
+Alt+wheel      - Navigate only same media type (video/image/audio, with looping)
+Spacebar       - Next image (image mode) or pause/play (video/audio)
+Up/Down        - Navigate through playlist (filtered by media type, with looping)
+Left/Right     - Frame-by-frame navigation (same as mouse wheel for video)
+
+PLAYLIST FILTERING:
+Media type: Only files of same type as starting file (video/image/audio)
+Variant mode: Set based on starting file (attempt file → ON, main file → OFF)
 OFF: Playlist contains main files only (no '_attempt_##' files)
 ON: Playlist contains all files including variants
 
@@ -1100,31 +1240,77 @@ mp.add_key_binding("ENTER", "toggle_fullscreen_enter", function() mp.command("cy
 mp.add_key_binding("UP", "navigate_prev", function() navigate_playlist("prev") end)
 mp.add_key_binding("DOWN", "navigate_next", function() navigate_playlist("next") end)
 
--- Mouse wheel navigation for images (restore standard behavior)
-mp.add_key_binding("WHEEL_UP", "wheel_prev", function() navigate_playlist("prev") end)
-mp.add_key_binding("WHEEL_DOWN", "wheel_next", function() navigate_playlist("next") end)
+-- Smart mouse wheel navigation (adapts to media type)
+mp.add_key_binding("WHEEL_UP", "wheel_prev", function() 
+    if rebuilding_playlist then return end
+    
+    update_media_type()
+    if current_media_type == "video" then
+        -- For videos: pause first, then frame-step backward
+        local paused = mp.get_property_bool("pause")
+        if not paused then
+            mp.command("set pause yes")
+        end
+        mp.command("frame-back-step")
+    else
+        -- For images/audio: navigate playlist
+        navigate_playlist("prev")
+    end
+end)
 
--- Alt + wheel for manual navigation (alternative)
-mp.add_key_binding("Alt+WHEEL_UP", "alt_wheel_prev", function() navigate_playlist("prev") end)
-mp.add_key_binding("Alt+WHEEL_DOWN", "alt_wheel_next", function() navigate_playlist("next") end)
+mp.add_key_binding("WHEEL_DOWN", "wheel_next", function() 
+    if rebuilding_playlist then return end
+    
+    update_media_type()
+    if current_media_type == "video" then
+        -- For videos: pause first, then frame-step forward
+        local paused = mp.get_property_bool("pause")
+        if not paused then
+            mp.command("set pause yes")
+        end
+        mp.command("frame-step")
+    else
+        -- For images/audio: navigate playlist
+        navigate_playlist("next")
+    end
+end)
+
+-- Alt + wheel for media type filtering (navigate only same media type)
+mp.add_key_binding("Alt+WHEEL_UP", "alt_wheel_prev", function() navigate_media_type("prev") end)
+mp.add_key_binding("Alt+WHEEL_DOWN", "alt_wheel_next", function() navigate_media_type("next") end)
+
+-- Spacebar for image mode (next image)
+mp.add_key_binding("SPACE", "smart_space", function() 
+    update_media_type()
+    if current_media_type == "image" then
+        navigate_playlist("next")
+    else
+        mp.command("cycle pause")  -- Default spacebar behavior for video/audio
+    end
+end)
 
 -- Rebuild playlist on start, but preserve the current file
+local last_processed_file = nil
 mp.register_event("start-file", function()
     local current_path = mp.get_property("path")
-    if current_path then
+    if current_path and current_path ~= last_processed_file then
         local dir = current_path:match("(.+)[/\\][^/\\]+$")
         local filename = current_path:match("([^/\\]+)$")
+        
+        -- Update media type (no mode display to avoid interfering with filename)
+        update_media_type()
         
         if dir and filename then
             -- Check if this is a new directory or single file load
             local playlist_count = mp.get_property_number("playlist-count") or 0
             local is_new_directory = (dir ~= current_directory)
             
-            -- Update current directory
-            current_directory = dir
-            msg.info("Directory set to: " .. dir)
-            
-            if playlist_count <= 1 or is_new_directory then
+            -- Only rebuild if it's actually a new directory or initial load
+            if is_new_directory or playlist_count <= 1 then
+                -- Update current directory
+                current_directory = dir
+                msg.info("Directory set to: " .. dir)
+                
                 -- Auto-set variant mode based on starting file
                 local has_attempt = has_attempt_suffix(filename)
                 local old_variant_mode = variant_mode_on
@@ -1145,12 +1331,14 @@ mp.register_event("start-file", function()
                 
                 msg.info("Rebuilding playlist on start (preserving current file)")
                 -- Very short delay to let file load, then rebuild while preserving position
-                mp.add_timeout(0.015, function()
+                mp.add_timeout(0.1, function()
                     force_rebuild = true
                     rebuild_playlist()
                 end)
             end
         end
+        
+        last_processed_file = current_path
     end
 end)
 
